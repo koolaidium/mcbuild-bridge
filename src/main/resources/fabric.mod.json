@@ -1,0 +1,19 @@
+{
+	"schemaVersion": 1,
+	"id": "mcbuild_bridge",
+	"version": "${version}",
+	"name": "AI Builder Bridge",
+	"description": "Lets the local mcbuild.py script send build commands to the running game instantly.",
+	"authors": ["you"],
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["com.mcbuild.McBuildMod"]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": ">=26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
