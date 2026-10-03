@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -44,8 +45,11 @@ import java.util.regex.Pattern;
 public class BridgeServer {
 	private static final int BASE_PORT = 25585;
 	private static final int PORT_TRIES = 10;
-	private static final int MAX_BODY = 1_000_000;
-	private static final int MAX_COMMANDS = 3000;
+	private static final int MAX_BODY = 200_000_000;      // 200x the old 1 MB
+	private static final int MAX_COMMANDS = 600_000;     // 200x the old 3000
+	// Commands run spread over ticks so huge builds can't trip the server watchdog.
+	private static final long TICK_BUDGET_NANOS = 30_000_000L; // 30 ms of each 50 ms tick
+	private static final long JOB_TIMEOUT_MINUTES = 120;
 
 	private static final Pattern KILL =
 		Pattern.compile("^kill @e\\[type=marker,tag=ai_[a-z0-9_]+\\]$");
@@ -54,6 +58,21 @@ public class BridgeServer {
 			+ "run (fill|setblock|summon marker) [A-Za-z0-9_~\\[\\]=,:{}\". -]+$");
 	private static final Pattern PLAYER_NAME = Pattern.compile("^[A-Za-z0-9_]{1,16}$");
 
+	private static final class Job {
+		final List<String> commands;
+		final String wantedPlayer;
+		final CompletableFuture<JsonObject> future = new CompletableFuture<>();
+		String playerName;
+		CommandSourceStack source;
+		int next = 0;
+
+		Job(List<String> commands, String wantedPlayer) {
+			this.commands = commands;
+			this.wantedPlayer = wantedPlayer;
+		}
+	}
+
+	private final ConcurrentLinkedQueue<Job> jobs = new ConcurrentLinkedQueue<>();
 	private final MinecraftServer server;
 	private final String token;
 	private final Path configFile;
@@ -97,6 +116,8 @@ public class BridgeServer {
 
 	public void stop() {
 		running = false;
+		Job j;
+		while ((j = jobs.poll()) != null) j.future.complete(error("game is shutting down"));
 		try {
 			if (socket != null) socket.close();
 		} catch (IOException ignored) {
@@ -122,7 +143,7 @@ public class BridgeServer {
 	}
 
 	private void handle(Socket s) throws IOException {
-		s.setSoTimeout(10_000);
+		s.setSoTimeout(60_000);
 		InputStream in = s.getInputStream();
 		OutputStream out = s.getOutputStream();
 
@@ -249,54 +270,64 @@ public class BridgeServer {
 			return error("bad json: " + e.getMessage());
 		}
 
-		final String wantedPlayer = wanted;
-		CompletableFuture<JsonObject> fut = new CompletableFuture<>();
-		server.execute(() -> {
-			try {
-				fut.complete(runOnServerThread(commands, wantedPlayer));
-			} catch (Throwable t) {
-				fut.completeExceptionally(t);
-			}
-		});
-		return await(fut);
+		Job job = new Job(commands, wanted);
+		jobs.add(job);
+		return await(job.future);
 	}
 
-	private JsonObject runOnServerThread(List<String> commands, String wantedPlayer) {
-		ServerPlayer target = null;
-		for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-			if (wantedPlayer == null || p.getName().getString().equalsIgnoreCase(wantedPlayer)) {
-				target = p;
-				break;
+	/** Called on the server thread at the end of every tick (see McBuildMod). */
+	public void tick() {
+		Job job = jobs.peek();
+		if (job == null) return;
+		try {
+			if (job.playerName == null) {
+				ServerPlayer target = null;
+				for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+					if (job.wantedPlayer == null || p.getName().getString().equalsIgnoreCase(job.wantedPlayer)) {
+						target = p;
+						break;
+					}
+				}
+				if (target == null) {
+					jobs.poll();
+					job.future.complete(error("no matching player is online - join the world first"));
+					return;
+				}
+				job.playerName = target.getName().getString();
+				job.source = server.createCommandSourceStack();
 			}
-		}
-		if (target == null) return error("no matching player is online - join the world first");
 
-		String name = target.getName().getString();
-		CommandSourceStack source = server.createCommandSourceStack();
-		int sent = 0;
-		for (String cmd : commands) {
-			String real;
-			if (cmd.startsWith("execute at @p ")) {
-				// swap the selector for the real name so it works from the server console source
-				real = "execute at " + name + " " + cmd.substring("execute at @p ".length());
-			} else {
-				// hop into the player's dimension first so marker lookups happen there
-				real = "execute at " + name + " run " + cmd;
+			long end = System.nanoTime() + TICK_BUDGET_NANOS;
+			do {
+				String cmd = job.commands.get(job.next++);
+				String real;
+				if (cmd.startsWith("execute at @p ")) {
+					// swap the selector for the real name so it works from the server console source
+					real = "execute at " + job.playerName + " " + cmd.substring("execute at @p ".length());
+				} else {
+					// hop into the player's dimension first so marker lookups happen there
+					real = "execute at " + job.playerName + " run " + cmd;
+				}
+				server.getCommands().performPrefixedCommand(job.source, real);
+			} while (job.next < job.commands.size() && System.nanoTime() < end);
+
+			if (job.next >= job.commands.size()) {
+				jobs.poll();
+				McBuildMod.LOGGER.info("AI Builder Bridge ran {} commands for {}", job.next, job.playerName);
+				JsonObject o = new JsonObject();
+				o.addProperty("sent", job.next);
+				o.addProperty("player", job.playerName);
+				job.future.complete(o);
 			}
-			server.getCommands().performPrefixedCommand(source, real);
-			sent++;
+		} catch (Throwable t) {
+			jobs.poll();
+			job.future.completeExceptionally(t);
 		}
-		McBuildMod.LOGGER.info("AI Builder Bridge ran {} commands for {}", sent, name);
-
-		JsonObject o = new JsonObject();
-		o.addProperty("sent", sent);
-		o.addProperty("player", name);
-		return o;
 	}
 
 	private static JsonObject await(CompletableFuture<JsonObject> fut) {
 		try {
-			return fut.get(60, TimeUnit.SECONDS);
+			return fut.get(JOB_TIMEOUT_MINUTES, TimeUnit.MINUTES);
 		} catch (Exception e) {
 			return error("game did not respond: " + e);
 		}

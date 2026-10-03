@@ -17,16 +17,26 @@ Needs: Fabric Loader 0.19.5+, Fabric API 0.160.5+26.3, Java 25 (what MC 26.x use
    sdk list java                                  # pick a Java 25 build, e.g. sdk install java 25-tem
    sdk install gradle 9.6.0
    gradle build
-   -> build/libs/mcbuild-bridge-1.0.0.jar  (NOT the -sources jar)
+   -> build/libs/mcbuild-bridge-1.1.0.jar  (NOT the -sources jar)
+
+## Updating from 1.0.0
+Delete the old `mcbuild-bridge-1.0.0.jar` from your `mods` folder first. Two copies of the
+same mod make the game refuse to start. After changing code: git add . && git commit -m "x" && git push
 
 ## Install
-Put `mcbuild-bridge-1.0.0.jar` in your CurseForge instance's `mods` folder
+Put `mcbuild-bridge-1.1.0.jar` in your CurseForge instance's `mods` folder
 (CurseForge app -> your profile -> three dots -> Open Folder -> mods).
 Make sure Fabric API is installed too. Launch the game and open a world.
 
 ## Use
 Run `python3 mcbuild.py`. It shows "Game: connected" when the mod is running.
 Describe a build, and it appears just ahead of you. Type `undo` to remove it.
+
+## Big builds (v1.1.0)
+Limits are 200x higher (600,000 commands, 200 MB per request). Commands now run on a
+per-tick time budget (30 ms of each 50 ms tick) instead of all at once, because running
+that many in one tick would trip Minecraft's watchdog and crash the server. Huge builds
+therefore fill in gradually while you keep playing. Fills only work in loaded chunks.
 
 ## How it works / safety
 - On world start the mod opens a server on 127.0.0.1 (port 25585+) and writes

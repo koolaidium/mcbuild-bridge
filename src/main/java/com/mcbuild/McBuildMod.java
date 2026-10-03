@@ -2,6 +2,7 @@ package com.mcbuild;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,6 +30,10 @@ public class McBuildMod implements ModInitializer {
 			}
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> stopBridge());
+		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			BridgeServer b = bridge;
+			if (b != null) b.tick();
+		});
 	}
 
 	private void stopBridge() {
